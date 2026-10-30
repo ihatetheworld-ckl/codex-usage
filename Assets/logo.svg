@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 610 180" fill="none">
+  <title>Codex Usage</title>
+  <g transform="translate(0,-4) scale(.72)">
+    <path d="M187 74C158 45 113 45 82 68C44 104 53 164 94 189C124 208 164 202 187 181" stroke="#0E4047" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M110 99V139C110 154 118 163 132 163C146 163 155 154 155 139V99" stroke="#1AA694" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="194" y="103" fill="#0E4047" font-family="-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="51" font-weight="550" letter-spacing="-1.8">Codex Usage</text>
+</svg>

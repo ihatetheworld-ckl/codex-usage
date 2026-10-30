@@ -1,0 +1,16 @@
+.build/
+dist/
+.DS_Store
+**/bin/
+**/obj/
+.dotnet/
+.nuget/
+artifacts/
+VALIDATION.md
+*.user
+*.suo
+*.pfx
+*.p12
+*.pem
+.env
+.env.*
