@@ -14,6 +14,15 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
         if !condition() { fputs("FAIL: \(message)\n", stderr); exit(1) }
     }
 
+    private func waitFor(_ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            if condition() { return true }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        } while Date() < deadline
+        return condition()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.isMovable = false
@@ -71,6 +80,8 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
         menu.popUp(positioning: nil, at: NSPoint(x: panel.frame.maxX + 10, y: panel.frame.maxY), in: nil)
         panel.orderOut(nil)
         verifyFreeModePersistence()
+        verifyHostWindowIdentity()
+        verifyNativeFilePanel()
         print("PASS: \(checks) native menu and window gesture checks")
         NSApp.terminate(nil)
     }
@@ -143,18 +154,107 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
     }
 
     private func visibleCodexWindow() -> NSRect? {
-        let pids = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").map(\.processIdentifier)
-        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
-              let screenTop = NSScreen.screens.first?.frame.maxY else { return nil }
-        for entry in windows {
-            guard let pid = entry[kCGWindowOwnerPID as String] as? Int32, pids.contains(pid),
-                  entry[kCGWindowLayer as String] as? Int == 0,
-                  let bounds = entry[kCGWindowBounds as String] as? [String: CGFloat],
-                  let x = bounds["X"], let y = bounds["Y"], let w = bounds["Width"], let h = bounds["Height"],
-                  w >= 500, h >= 300 else { continue }
-            return NSRect(x: x, y: screenTop - y - h, width: w, height: h)
+        CodexWindowTracker().selection()?.window.frame
+    }
+
+    private func verifyHostWindowIdentity() {
+        let main = CodexWindowTracker.Window(id: 101, pid: 7, frame: NSRect(x: 80, y: 80, width: 1200, height: 800), onScreen: true)
+        let picker = CodexWindowTracker.Window(id: 102, pid: 7, frame: NSRect(x: 240, y: 240, width: 879, height: 448), onScreen: true)
+        var windows: [CodexWindowTracker.Window]? = [main]
+        let tracker = CodexWindowTracker(snapshot: { windows })
+        check(tracker.selection()?.window.id == main.id, "bind to the main window before a picker opens")
+        windows = [picker, main]
+        check(tracker.selection()?.window.id == main.id, "a frontmost file picker cannot replace the host")
+        check(tracker.selection()?.blocked == true, "a host-owned file picker suppresses the docked widget")
+        let coldStart = CodexWindowTracker(snapshot: { windows })
+        check(coldStart.selection()?.window.id == main.id && coldStart.selection()?.blocked == true,
+              "starting with an open picker still binds to the underlying main window")
+        windows = nil
+        check(tracker.selection() == nil, "failed window snapshots hide the widget safely")
+        windows = [picker, main]
+        check(tracker.selection()?.window.id == main.id, "a failed snapshot does not forget the main window")
+        windows = [main]
+        check(tracker.selection()?.blocked == false, "closing the picker restores the same host")
+        let moved = CodexWindowTracker.Window(id: 101, pid: 7, frame: NSRect(x: 140, y: 100, width: 1200, height: 800), onScreen: true)
+        windows = [moved]
+        check(tracker.selection()?.window.frame == moved.frame, "the bound main window still follows moves and resize")
+        windows = [CodexWindowTracker.Window(id: 101, pid: 7, frame: main.frame, onScreen: false)]
+        check(tracker.selection() == nil, "minimized or off-space hosts hide the widget")
+        windows = [CodexWindowTracker.Window(id: 101, pid: 7, frame: NSRect(x: 16, y: 376, width: 140, height: 150), onScreen: true)]
+        check(tracker.selection() == nil, "a temporary miniature frame during minimization never becomes a dock anchor")
+        windows = [picker, main]
+        check(tracker.selection()?.window.id == main.id && tracker.selection()?.blocked == true,
+              "restoring the host behind a picker never adopts the picker")
+        windows = []
+        check(tracker.selection() == nil, "closing all host windows hides the widget")
+        windows = [CodexWindowTracker.Window(id: 103, pid: 8, frame: main.frame, onScreen: true)]
+        check(tracker.selection()?.window.id == 103, "a replacement host is accepted after the original closes")
+    }
+
+    private func verifyNativeFilePanel() {
+        let settings = UserDefaults.standard
+        let savedMode = settings.object(forKey: "displayMode")
+        defer {
+            if let savedMode { settings.set(savedMode, forKey: "displayMode") }
+            else { settings.removeObject(forKey: "displayMode") }
         }
-        return nil
+        settings.set("follow", forKey: "displayMode")
+        let screen = NSScreen.main!.visibleFrame
+        let host = NSWindow(contentRect: NSRect(x: screen.minX + 40, y: screen.minY + 40, width: 1000, height: 680),
+                            styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        host.title = "Codex Usage regression test host"
+        host.isReleasedWhenClosed = false
+        NSApp.activate(ignoringOtherApps: true)
+        host.makeKeyAndOrderFront(nil)
+        check(waitFor {
+            CodexWindowTracker.windows(processIDs: [ProcessInfo.processInfo.processIdentifier])?.contains {
+                $0.id == CGWindowID(host.windowNumber) && $0.onScreen
+            } == true
+        }, "WindowServer registers the native test host")
+        let picker = NSOpenPanel()
+        picker.directoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
+        var allowedIDs: Set<CGWindowID> = [CGWindowID(host.windowNumber)]
+        let tracker = CodexWindowTracker(snapshot: {
+            CodexWindowTracker.windows(processIDs: [ProcessInfo.processInfo.processIdentifier])?.filter { allowedIDs.contains($0.id) }
+        })
+        let subject = AppDelegate(windowTracker: tracker, hostIsFrontmost: { true })
+        subject.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        subject.positionPanel()
+        guard let floating = NSApp.windows.first(where: { $0.title == "Codex 剩余用量" && $0.isVisible }) else {
+            check(false, "docked widget is visible above a real native host"); return
+        }
+        let anchor = WidgetLayout.anchor(in: host.frame)
+        check(floating.frame.origin == anchor && floating.level == .normal, "docked window uses the main host's anchor and normal level")
+        picker.beginSheetModal(for: host) { _ in }
+        allowedIDs.insert(CGWindowID(picker.windowNumber))
+        let pickerReady = waitFor { picker.isVisible && tracker.selection()?.blocked == true }
+        if !pickerReady {
+            print("Picker state:", picker.isVisible, "IDs:", allowedIDs,
+                  "WindowServer:", CodexWindowTracker.windows(processIDs: [ProcessInfo.processInfo.processIdentifier]) as Any)
+        }
+        check(pickerReady, "a real native file picker is open")
+        check(tracker.selection()?.window.id == CGWindowID(host.windowNumber), "native picker leaves main-window identity unchanged")
+        subject.positionPanel()
+        check(!floating.isVisible, "docked widget hides while the real file picker is open")
+        check(floating.frame.origin == anchor, "file picker never becomes the widget's anchor")
+        let restarted = CodexWindowTracker(snapshot: {
+            CodexWindowTracker.windows(processIDs: [ProcessInfo.processInfo.processIdentifier])?.filter { allowedIDs.contains($0.id) }
+        })
+        check(restarted.selection()?.window.id == CGWindowID(host.windowNumber) && restarted.selection()?.blocked == true,
+              "a cold tracker recognizes the main host behind a real picker")
+        picker.cancel(nil)
+        check(waitFor { tracker.selection()?.blocked == false }, "WindowServer removes the canceled picker")
+        subject.positionPanel()
+        check(floating.isVisible && floating.frame.origin == anchor, "canceling the picker restores the widget to the same main anchor")
+        host.setFrameOrigin(NSPoint(x: host.frame.minX + 24, y: host.frame.minY + 16))
+        check(waitFor { tracker.selection()?.window.frame == host.frame }, "WindowServer reports the moved main host")
+        subject.positionPanel()
+        check(floating.frame.origin == WidgetLayout.anchor(in: host.frame), "normal following still works after canceling the picker")
+        subject.perform(NSSelectorFromString("freeMode"))
+        check(floating.level == .floating && floating.isVisible, "free-floating mode retains its independent floating level")
+        subject.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        floating.orderOut(nil)
+        host.close()
     }
 }
 

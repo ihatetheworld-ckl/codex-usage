@@ -35,6 +35,7 @@ Use `CODEX_USAGE_CLI` for a nonstandard CLI location. Windows supports native `c
 - 48 × 84 point capsule displaying **remaining** 5-hour and weekly quotas; polls every 30 seconds.
 - Click or right-click for remaining progress, reset countdowns, refresh and settings.
 - **Docked:** follows the desktop window and snaps back to the lower-left corner when a drag is released.
+- **macOS file dialogs:** keeps the main-window binding, hides while a system file picker is open, and returns to the main window's lower-left corner on dismissal.
 - **Free-floating:** keeps its dropped position, including across mode changes and restarts.
 - Menu-bar-only / tray-only mode, stale-data indication, and unknown values shown as `—`.
 - macOS 26+ uses native clear Liquid Glass; older macOS uses a frosted material. Windows uses its own translucent rounded card, not macOS Liquid Glass.
@@ -74,7 +75,7 @@ See [TESTING.md](docs/TESTING.md). Both platform jobs must succeed before a tag 
 
 macOS has been checked with a real account and native window interactions on Apple Silicon. The Intel slice is cross-compiled. Windows CI checks actual WPF startup, docking, its drag controller, details and transparent corners with synthetic quotas and a native test host. **A real-account check on the user's Windows device has not been completed.**
 
-The default dock assumes the desktop app's 56-point left rail. App redesigns, hidden rails, unusual installation locations and mixed-DPI multi-monitor setups may require adaptation. The tool cannot distinguish Codex from other pages inside a shared ChatGPT desktop window. It does not select remote accounts or provide its own login flow.
+The default dock assumes the desktop app's 56-point left rail. On macOS, docking stays bound to the initial main window until it closes, so newly opened file dialogs cannot become the host. Windows follows the foreground host window. App redesigns, hidden rails, unusual installation locations and mixed-DPI multi-monitor setups may require adaptation. The tool cannot distinguish Codex from other pages inside a shared ChatGPT desktop window. It does not select remote accounts or provide its own login flow.
 
 Preferences: macOS `local.codex-usage-sidebar`; Windows `%LOCALAPPDATA%\CodexUsage\settings.json`. Quit and delete the application to uninstall, optionally removing these preferences.
 

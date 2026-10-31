@@ -5,8 +5,74 @@ final class UsagePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// Window numbers remain stable when a sheet or an open/save panel becomes frontmost.
+/// Keep the host's identity instead of adopting whichever large window is in front.
+final class CodexWindowTracker {
+    struct Window {
+        let id: CGWindowID
+        let pid: Int32
+        let frame: NSRect
+        let onScreen: Bool
+    }
+    struct Selection {
+        let window: Window
+        let blocked: Bool
+    }
+    private let snapshot: () -> [Window]?
+    private var boundWindow: Window?
+
+    init(snapshot: @escaping () -> [Window]? = CodexWindowTracker.codexWindows) {
+        self.snapshot = snapshot
+    }
+
+    func selection() -> Selection? {
+        guard let windows = snapshot() else { return nil }
+        if let bound = boundWindow,
+           !windows.contains(where: { $0.id == bound.id && $0.pid == bound.pid }) {
+            boundWindow = nil
+        }
+        if boundWindow == nil {
+            // Sheets and file panels precede their parent in front-to-back order, including
+            // when the widget starts while a panel is already open. Start with the backmost
+            // eligible host, and retain it until it actually closes (not when minimized).
+            boundWindow = windows.last(where: { $0.onScreen && $0.frame.width >= 500 && $0.frame.height >= 300 })
+        }
+        guard let bound = boundWindow,
+              let index = windows.firstIndex(where: { $0.id == bound.id && $0.pid == bound.pid }),
+              windows[index].onScreen, windows[index].frame.width >= 500, windows[index].frame.height >= 300 else { return nil }
+        boundWindow = windows[index]
+        return Selection(window: windows[index], blocked: windows[..<index].contains {
+            $0.onScreen && $0.pid == bound.pid && $0.frame.width > 1 && $0.frame.height > 1
+        })
+    }
+
+    static func codexWindows() -> [Window]? {
+        let pids = Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").map(\.processIdentifier))
+        return windows(processIDs: pids)
+    }
+
+    static func windows(processIDs: Set<Int32>) -> [Window]? {
+        // Include off-screen windows so minimizing the main window cannot rebind to a dialog.
+        guard let entries = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              let primaryTop = NSScreen.screens.first?.frame.maxY else { return nil }
+        return entries.compactMap { entry in
+            guard let pid = entry[kCGWindowOwnerPID as String] as? Int32, processIDs.contains(pid),
+                  entry[kCGWindowLayer as String] as? Int == 0,
+                  let id = entry[kCGWindowNumber as String] as? CGWindowID,
+                  let bounds = entry[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = bounds["X"], let y = bounds["Y"], let width = bounds["Width"], let height = bounds["Height"],
+                  width > 1, height > 1 else { return nil }
+            return Window(id: id, pid: pid,
+                          frame: NSRect(x: x, y: primaryTop - y - height, width: width, height: height),
+                          onScreen: entry[kCGWindowIsOnscreen as String] as? Bool ?? false)
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let client = CodexClient()
+    private let windowTracker: CodexWindowTracker
+    private let hostIsFrontmost: () -> Bool
     private var payload: UsagePayload?
     private var updatedAt: Date?
     private var errorMessage: String?
@@ -22,6 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isInteracting = false
     private var mode = UserDefaults.standard.string(forKey: "displayMode") ?? "follow"
     private var lastWindow: NSRect?
+    private var lastWindowID: CGWindowID?
+    private var hostBlocked = false
     private var freeOrigin: NSPoint? = {
         let settings = UserDefaults.standard
         guard settings.object(forKey: "freeX") != nil, settings.object(forKey: "freeY") != nil else { return nil }
@@ -31,6 +99,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let diagnosticsPath = ProcessInfo.processInfo.environment["CODEX_USAGE_DIAGNOSTICS"]
     private var renderedPreview = false
     private var previewTask: DispatchWorkItem?
+
+    init(windowTracker: CodexWindowTracker = CodexWindowTracker(),
+         hostIsFrontmost: @escaping () -> Bool = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.openai.codex" }) {
+        self.windowTracker = windowTracker
+        self.hostIsFrontmost = hostIsFrontmost
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -62,6 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         poller = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.client.refresh() }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(hostActivationChanged), name: NSWorkspace.didActivateApplicationNotification, object: nil)
         render(); positionPanel(); client.refresh()
         if let raw = ProcessInfo.processInfo.environment["CODEX_USAGE_QUIT_AFTER"], let seconds = Double(raw), seconds > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { NSApp.terminate(nil) }
@@ -73,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Codex 剩余用量"
         panel.isOpaque = false; panel.backgroundColor = .clear
-        panel.level = .floating; panel.hasShadow = false
+        panel.level = mode == "free" ? .floating : .normal; panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.isReleasedWhenClosed = false
@@ -168,22 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func codexWindow() -> NSRect? {
-        let pids = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").map(\.processIdentifier)
-        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
-              let primaryTop = NSScreen.screens.first?.frame.maxY else { return nil }
-        for window in windows {
-            guard let pid = window[kCGWindowOwnerPID as String] as? Int32, pids.contains(pid),
-                  window[kCGWindowLayer as String] as? Int == 0,
-                  let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
-                  let x = bounds["X"], let y = bounds["Y"], let width = bounds["Width"], let height = bounds["Height"],
-                  width >= 500, height >= 300 else { continue }
-            return NSRect(x: x, y: primaryTop - y - height, width: width, height: height)
-        }
-        return nil
-    }
-
-    private func positionPanel() {
+    func positionPanel() {
         if isInteracting { return }
         guard mode != "menu" else { panel.orderOut(nil); return }
         if mode == "free" {
@@ -197,15 +258,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         if menuOpen { return }
-        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.openai.codex",
-              let window = codexWindow() else { panel.orderOut(nil); lastWindow = nil; return }
+        guard hostIsFrontmost(), let selection = windowTracker.selection() else {
+            panel.orderOut(nil); lastWindow = nil; lastWindowID = nil; hostBlocked = false
+            writeDiagnostics(); return
+        }
+        let window = selection.window.frame
         lastWindow = window
+        lastWindowID = selection.window.id
+        hostBlocked = selection.blocked
+        // Hide during host-owned dialogs. Do not move to or float above the file picker.
+        guard !selection.blocked else { panel.orderOut(nil); writeDiagnostics(); return }
         let anchor = WidgetLayout.anchor(in: window)
         var point = anchor
         point.x = min(max(point.x, window.minX + 2), window.maxX - panel.frame.width - 2)
         point.y = min(max(point.y, window.minY + 2), window.maxY - panel.frame.height - 40)
         if abs(panel.frame.minX - point.x) > 0.5 || abs(panel.frame.minY - point.y) > 0.5 { panel.setFrameOrigin(point) }
-        if !panel.isVisible { panel.orderFrontRegardless() }
+        // Stay just above the host, at its normal window level. A newly opened system
+        // dialog can cover the widget immediately, even before the next positioning tick.
+        panel.order(.above, relativeTo: Int(selection.window.id))
         writeDiagnostics()
     }
 
@@ -230,6 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         mode = next; UserDefaults.standard.set(next, forKey: "displayMode")
+        panel.level = next == "free" ? .floating : .normal
         buildMenu(); positionPanel(); render()
     }
 
@@ -239,6 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "mode": mode, "panelVisible": panel.isVisible, "displayMetric": "remaining",
             "isDragging": isInteracting, "detailDrawCount": details.drawCount,
             "panelFrame": NSStringFromRect(panel.frame), "codexWindowFound": lastWindow != nil,
+            "codexWindowID": lastWindowID as Any? ?? NSNull(), "hostDialogVisible": hostBlocked,
             "codexWindowFrame": lastWindow.map(NSStringFromRect) as Any? ?? NSNull(),
             "nativeLiquidGlass": glassRoot.nativeGlass,
             "updatedAt": updatedAt.map { ISO8601DateFormatter().string(from: $0) } as Any? ?? NSNull(),
@@ -257,6 +329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc private func refreshNow() { client.refresh() }
     @objc private func didWake() { client.refresh(); positionPanel() }
+    @objc private func hostActivationChanged() { positionPanel() }
     @objc private func followMode() { changeMode("follow") }
     @objc private func freeMode() { changeMode("free") }
     @objc private func menuMode() { changeMode("menu") }
@@ -267,5 +340,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {
         ticker?.invalidate(); poller?.invalidate(); client.stop()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 }

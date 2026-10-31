@@ -6,6 +6,8 @@
 
 `bash scripts/test-ui.sh` opens native AppKit windows and a native menu, dispatches mouse events to those test windows, and checks menu painting, click-versus-drag behavior, and free-position persistence. It uses synthetic data and a separate preferences domain.
 
+It also opens an actual `NSOpenPanel` sheet on a native test host. It checks that the docked widget retains the main window's identity, hides during the picker, returns on cancellation, follows subsequent host movement, and keeps the floating level in free mode. WindowServer registration is awaited rather than assumed synchronous. Snapshot regressions cover startup with an already-open picker, temporary snapshot failure, minimization/restoration, and replacement of a closed host.
+
 With the Codex desktop app foregrounded, `CODEX_USAGE_UI_WITH_CODEX=1 bash scripts/test-ui.sh` additionally checks immediate docking snap-back against the actual host window bounds. This was checked on the development Apple Silicon Mac. This host-dependent check is not run on GitHub's clean runners, which do not contain a signed-in Codex desktop app.
 
 Release packaging cross-compiles `arm64` and `x86_64`, combines them with `lipo`, and verifies both slices and the ad hoc application signature. CI executes the native UI tests on Apple Silicon; it does not prove Intel hardware behavior.

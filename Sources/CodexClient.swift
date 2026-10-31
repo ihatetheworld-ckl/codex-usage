@@ -71,7 +71,7 @@ final class CodexClient {
         do {
             try child.run()
             send(["id": 1, "method": "initialize", "params": ["clientInfo": [
-                "name": "codex_usage", "title": "Codex Usage", "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.3.0"
+                "name": "codex_usage", "title": "Codex Usage", "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.3.1"
             ]]])
             armTimeout()
         } catch {
