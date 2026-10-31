@@ -9,14 +9,38 @@ enum WidgetLayout {
     }
 }
 
+/// Keep the gauge at its final size while its glass container grows around it.
+private final class GaugeBody: NSView {
+    let gaugeSize: NSSize
+    init(size: NSSize) {
+        gaugeSize = size
+        super.init(frame: NSRect(origin: .zero, size: size))
+        wantsLayer = true
+        layer?.masksToBounds = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func layout() {
+        super.layout()
+        let frame = NSRect(x: bounds.midX - gaugeSize.width / 2, y: bounds.midY - gaugeSize.height / 2,
+                           width: gaugeSize.width, height: gaugeSize.height)
+        for view in subviews where view.frame != frame { view.frame = frame }
+    }
+}
+
 /// Transparent window root. Glass has its own rounded shape; no rectangular backdrop is painted.
 final class GlassRoot: NSView {
+    static let revealDuration: TimeInterval = 0.240
     let body: NSView
     let nativeGlass: Bool
+    private var glass: NSView!
+    private var revealTimer: Timer?
+    private(set) var revealProgress: CGFloat = 1
+    var isRevealing: Bool { revealTimer != nil }
+    var glassFrame: NSRect { glass.frame }
     override var isOpaque: Bool { false }
 
     init(size: NSSize) {
-        body = NSView(frame: NSRect(origin: .zero, size: NSSize(width: size.width - 6, height: size.height - 6)))
+        body = GaugeBody(size: NSSize(width: size.width - 6, height: size.height - 6))
         if #available(macOS 26, *) { nativeGlass = true } else { nativeGlass = false }
         super.init(frame: NSRect(origin: .zero, size: size))
         wantsLayer = true; layer?.backgroundColor = NSColor.clear.cgColor
@@ -28,14 +52,80 @@ final class GlassRoot: NSView {
             glass.tintColor = nil
             glass.contentView = body
             addSubview(glass)
+            self.glass = glass
         } else {
             let glass = NSVisualEffectView(frame: glassFrame)
             glass.material = .menu; glass.blendingMode = .behindWindow; glass.state = .active
             glass.wantsLayer = true; glass.layer?.cornerRadius = 18; glass.layer?.masksToBounds = true
             glass.addSubview(body); addSubview(glass)
+            self.glass = glass
         }
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Called once, before ordering a previously hidden window on screen.
+    /// Animate native glass geometry, never the window's frame or text scale.
+    func reveal(reduceMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion) {
+        finishReveal()
+        guard !reduceMotion else { return }
+        applyReveal(0)
+        let started = ProcessInfo.processInfo.systemUptime
+        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            let progress = CGFloat((ProcessInfo.processInfo.systemUptime - started) / Self.revealDuration)
+            if progress >= 1 { self.finishReveal() }
+            else { self.applyReveal(progress) }
+        }
+        revealTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// Hide/click/drag/mode changes cancel the timer synchronously. No delayed
+    /// completion can repaint or resurrect an old appearance after switching away.
+    func finishReveal() {
+        revealTimer?.invalidate(); revealTimer = nil
+        applyReveal(1)
+    }
+
+    private func applyReveal(_ rawProgress: CGFloat) {
+        let p = min(max(rawProgress, 0), 1)
+        revealProgress = p
+        func easeOut(_ value: CGFloat) -> CGFloat {
+            let t = min(max(value, 0), 1)
+            return 1 - pow(1 - t, 3)
+        }
+        func smooth(_ value: CGFloat) -> CGFloat {
+            let t = min(max(value, 0), 1)
+            return t * t * (3 - 2 * t)
+        }
+        let full = bounds.insetBy(dx: WidgetLayout.glassInset, dy: WidgetLayout.glassInset)
+        let circle = easeOut(p / 0.5)
+        let elongation = easeOut((p - 0.2) / 0.8)
+        let width = 6 + (full.width - 6) * circle
+        let height = 6 + (full.width - 6) * circle + (full.height - full.width) * elongation
+        let radius = min(width / 2, 21 - 3 * elongation)
+        // Explicit frames at display cadence keep native glass/refraction shaped
+        // correctly, including during an interrupted reveal. No implicit tweening.
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        NSAnimationContext.current.allowsImplicitAnimation = false
+        glass.frame = NSRect(x: full.midX - width / 2, y: full.midY - height / 2,
+                             width: width, height: height)
+        if #available(macOS 26, *), let native = glass as? NSGlassEffectView {
+            native.cornerRadius = radius
+        } else {
+            glass.layer?.cornerRadius = radius
+        }
+        glass.layoutSubtreeIfNeeded()
+        body.frame = glass.bounds
+        body.needsLayout = true
+        body.layoutSubtreeIfNeeded()
+        body.alphaValue = smooth((p - 0.45) / 0.55)
+        glass.alphaValue = smooth(p / 0.1)
+        NSAnimationContext.endGrouping()
+    }
+
+    deinit { revealTimer?.invalidate() }
 }
 
 final class CompactGauge: NSView {

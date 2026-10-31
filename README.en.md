@@ -35,6 +35,8 @@ Use `CODEX_USAGE_CLI` for a nonstandard CLI location. Windows supports native `c
 - 48 × 84 point capsule displaying **remaining** 5-hour and weekly quotas; polls every 30 seconds.
 - Click or right-click for remaining progress, reset countdowns, refresh and settings.
 - **Docked:** follows the desktop window and snaps back to the lower-left corner when a drag is released.
+- **240 ms appearance:** grows from a centered dot into the capsule, then fades in its unscaled values. Switching away, clicking, or dragging cancels the animation; system reduced-motion preferences are respected.
+- **macOS restoration:** waits for the main window's Stage Manager expansion to settle before revealing, avoiding a temporary position followed by a jump to the final anchor.
 - **macOS file dialogs:** keeps the main-window binding, hides while a system file picker is open, and returns to the main window's lower-left corner on dismissal.
 - **Free-floating:** keeps its dropped position, including across mode changes and restarts.
 - Menu-bar-only / tray-only mode, stale-data indication, and unknown values shown as `—`.

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -18,7 +20,8 @@ internal static class WindowsSmokeTest
     {
         var app = new System.Windows.Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         var host = new Window { Title = "Codex Usage self-test host", Width = 800, Height = 600, Left = 100, Top = 80 };
-        var widget = new MainWindow(true, () => NativeWindows.Bounds(new WindowInteropHelper(host).Handle, app.MainWindow!));
+        var hostAvailable = true;
+        var widget = new MainWindow(true, () => hostAvailable ? NativeWindows.Bounds(new WindowInteropHelper(host).Handle, app.MainWindow!) : null);
         var checks = 0;
         void Check(bool condition, string description)
         {
@@ -34,6 +37,41 @@ internal static class WindowsSmokeTest
                 var bounds = NativeWindows.Bounds(new WindowInteropHelper(host).Handle, widget)!.Value;
                 var docked = new Point(bounds.Left + 4, bounds.Bottom - 104 - widget.Height);
                 Check(new Point(widget.Left, widget.Top) == docked, "Initial docking position");
+                var capsule = (Border)widget.FindName("Capsule");
+                var quotaContent = (Grid)widget.FindName("QuotaContent");
+                var fixedSize = new Size(widget.Width, widget.Height);
+                var samples = new List<(double Width, double Height, double Opacity)>();
+                Check(MainWindow.RevealDuration == TimeSpan.FromMilliseconds(240), "Appearance duration must be 240 ms");
+                widget.StartReveal(true);
+                Check(capsule.Width == 6 && capsule.Height == 6 && quotaContent.Opacity == 0, "Appearance must start from a dot without text");
+                var clock = Stopwatch.StartNew();
+                do
+                {
+                    await Task.Delay(15);
+                    widget.UpdateLayout();
+                    samples.Add((capsule.Width, capsule.Height, quotaContent.Opacity));
+                    var center = capsule.TranslatePoint(new Point(capsule.ActualWidth / 2, capsule.ActualHeight / 2), widget);
+                    Check(Math.Abs(center.X - 24) < 1 && Math.Abs(center.Y - 42) < 1, "Appearance center must not drift");
+                    Check(new Point(widget.Left, widget.Top) == docked && new Size(widget.Width, widget.Height) == fixedSize, "Appearance must not move or resize the window");
+                    Check(quotaContent.Width == 40.6 && quotaContent.Height == 76.6 && quotaContent.RenderTransform.Value.IsIdentity, "Appearance must not stretch text");
+                } while (widget.IsRevealing && clock.Elapsed < TimeSpan.FromSeconds(2));
+                Check(!widget.IsRevealing && clock.Elapsed.TotalMilliseconds >= 240 && clock.Elapsed.TotalMilliseconds < 1000, "Appearance must finish and stop its timer");
+                Check(samples.Any(s => s.Opacity > 0 && s.Opacity < 1), "Text must fade in after expansion begins");
+                Check(samples.Zip(samples.Skip(1)).All(pair => pair.First.Width <= pair.Second.Width && pair.First.Height <= pair.Second.Height), "Appearance must expand without bouncing");
+                Check(capsule.Width == 42 && capsule.Height == 78 && quotaContent.Opacity == 1, "Completed appearance must restore the original surface");
+                widget.StartReveal(true);
+                await Task.Delay(35);
+                widget.Position();
+                Check(capsule.Width > 6, "Normal positioning must not restart an active appearance");
+                hostAvailable = false; widget.Position();
+                Check(!widget.IsVisible && !widget.IsRevealing, "Switching away must hide the widget and cancel its appearance");
+                await Task.Delay(280);
+                Check(!widget.IsVisible, "Canceled appearance must not show the widget again");
+                hostAvailable = true; widget.Position();
+                Check(widget.IsVisible && new Point(widget.Left, widget.Top) == docked, "Returning must reveal at the correct anchor");
+                widget.FinishReveal();
+                widget.StartReveal(false);
+                Check(!widget.IsRevealing && quotaContent.Opacity == 1, "Disabled system animation must show readable content immediately");
                 widget.SeedSelfTest(new(new(25, DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds()), new(11, DateTimeOffset.UtcNow.AddDays(3).ToUnixTimeSeconds()), DateTimeOffset.UtcNow));
                 var start = new Point(widget.Left + 24, widget.Top + 42);
                 widget.BeginDrag(start); widget.MoveDrag(new Point(start.X + 100, start.Y + 50));

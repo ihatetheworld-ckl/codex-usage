@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -19,12 +20,17 @@ public partial class MainWindow : Window
     private readonly Func<Rect?>? testHost;
     private readonly DispatcherTimer positionTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private readonly DispatcherTimer quotaTimer = new() { Interval = TimeSpan.FromSeconds(30) };
+    private readonly DispatcherTimer revealTimer = new(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(1000.0 / 120) };
+    private readonly Stopwatch revealClock = new();
     private readonly System.Windows.Forms.NotifyIcon? tray;
     private UsageSnapshot? snapshot;
     private string? error;
     private Point? pressPoint;
     private Point pressOrigin;
     private bool moved, menuOpen, shuttingDown;
+    private bool hasPresented;
+    internal static readonly TimeSpan RevealDuration = TimeSpan.FromMilliseconds(240);
+    internal bool IsRevealing => revealTimer.IsEnabled;
     private ContextMenu? currentMenu;
     internal ContextMenu? DetailsMenu => currentMenu;
     private static readonly Brush Ink = new SolidColorBrush(Color.FromRgb(23, 56, 59));
@@ -35,7 +41,12 @@ public partial class MainWindow : Window
         this.selfTest = selfTest; this.testHost = testHost;
         preferences = selfTest ? new() : Preferences.Load();
         InitializeComponent();
-        SourceInitialized += (_, _) => NativeWindows.MakeNonActivating(this);
+        SourceInitialized += (_, _) => { NativeWindows.MakeNonActivating(this); Opacity = 0; };
+        revealTimer.Tick += (_, _) =>
+        {
+            var progress = revealClock.Elapsed.TotalMilliseconds / RevealDuration.TotalMilliseconds;
+            if (progress >= 1) FinishReveal(); else ApplyReveal(progress);
+        };
         Loaded += async (_, _) =>
         {
             if (preferences.Mode == DisplayMode.Free && preferences.FreeX is { } x && preferences.FreeY is { } y) { Left = x; Top = y; }
@@ -55,7 +66,7 @@ public partial class MainWindow : Window
             tray = new System.Windows.Forms.NotifyIcon { Icon = new System.Drawing.Icon(stream), Text = "Codex Usage · 剩余用量", Visible = true };
             tray.MouseClick += (_, _) => Dispatcher.BeginInvoke(ShowDetails);
         }
-        Closing += (_, _) => { shuttingDown = true; positionTimer.Stop(); quotaTimer.Stop(); tray?.Dispose(); client.DisposeAsync().AsTask().GetAwaiter().GetResult(); };
+        Closing += (_, _) => { shuttingDown = true; FinishReveal(); positionTimer.Stop(); quotaTimer.Stop(); tray?.Dispose(); client.DisposeAsync().AsTask().GetAwaiter().GetResult(); };
     }
 
     private async Task RefreshAsync()
@@ -85,19 +96,58 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Position()
+    internal void Position()
     {
         if (pressPoint is not null || menuOpen) return;
-        if (preferences.Mode == DisplayMode.TrayOnly) { Hide(); return; }
-        if (preferences.Mode == DisplayMode.Free) { if (!IsVisible) Show(); return; }
+        if (preferences.Mode == DisplayMode.TrayOnly) { HideWidget(); return; }
+        if (preferences.Mode == DisplayMode.Free)
+        {
+            FinishReveal(); Opacity = 1; hasPresented = true;
+            if (!IsVisible) Show(); return;
+        }
         var host = testHost is null ? NativeWindows.ForegroundCodexBounds(this) : testHost();
-        if (host is null || host.Value.Width < 400 || host.Value.Height < 280) { Hide(); return; }
+        if (host is null || host.Value.Width < 400 || host.Value.Height < 280) { HideWidget(); return; }
         Left = host.Value.Left + 4; Top = host.Value.Bottom - 104 - Height;
+        if (!IsVisible || !hasPresented) { StartReveal(); Opacity = 1; hasPresented = true; }
         if (!IsVisible) Show();
+    }
+
+    private void HideWidget()
+    {
+        Hide(); FinishReveal(); hasPresented = false;
+    }
+
+    internal void StartReveal(bool? animate = null)
+    {
+        FinishReveal();
+        if (!(animate ?? SystemParameters.ClientAreaAnimation)) return;
+        ApplyReveal(0); revealClock.Restart(); revealTimer.Start();
+    }
+
+    internal void FinishReveal()
+    {
+        revealTimer.Stop(); revealClock.Reset(); ApplyReveal(1);
+    }
+
+    private void ApplyReveal(double progress)
+    {
+        var p = Math.Clamp(progress, 0, 1);
+        static double EaseOut(double value) => 1 - Math.Pow(1 - Math.Clamp(value, 0, 1), 3);
+        static double Smooth(double value) { var t = Math.Clamp(value, 0, 1); return t * t * (3 - 2 * t); }
+        var circle = EaseOut(p / 0.5);
+        var elongation = EaseOut((p - 0.2) / 0.8);
+        // Only the surface changes size. The native window and text canvas keep
+        // their final dimensions, so the anchor and glyphs never scale or jump.
+        Capsule.Width = 6 + 36 * circle;
+        Capsule.Height = 6 + 36 * circle + 36 * elongation;
+        Capsule.CornerRadius = new CornerRadius(Math.Min(Capsule.Width / 2, 21 - 3 * elongation));
+        Capsule.Opacity = Smooth(p / 0.1);
+        QuotaContent.Opacity = Smooth((p - 0.45) / 0.55);
     }
 
     internal void BeginDrag(Point screenPoint)
     {
+        FinishReveal();
         pressPoint = screenPoint; pressOrigin = new Point(Left, Top); moved = false;
     }
     internal void MoveDrag(Point screenPoint)
@@ -145,6 +195,7 @@ public partial class MainWindow : Window
 
     private void ShowDetails()
     {
+        FinishReveal();
         if (currentMenu?.IsOpen == true) return;
         var menu = new ContextMenu(); currentMenu = menu;
         var content = new StackPanel { Width = 230, Margin = new Thickness(12, 8, 12, 8) };

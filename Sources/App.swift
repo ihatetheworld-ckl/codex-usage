@@ -83,6 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let details = DetailCard()
     private var ticker: Timer?
     private var poller: Timer?
+    private var placementRetry: Timer?
+    private var pendingDockWindow: CodexWindowTracker.Window?
+    private var pendingDockStableSince: TimeInterval?
     private var menu: NSMenu!
     private var menuOpen = false
     private var isInteracting = false
@@ -151,17 +154,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.isOpaque = false; panel.backgroundColor = .clear
         panel.level = mode == "free" ? .floating : .normal; panel.hasShadow = false
         panel.hidesOnDeactivate = false
+        panel.animationBehavior = .none
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.isReleasedWhenClosed = false
         panel.isMovable = false // The gauge handles the complete mouse gesture, including click vs drag.
         glassRoot = GlassRoot(size: WidgetLayout.size)
         panel.contentView = glassRoot
         gauge = CompactGauge(frame: glassRoot.body.bounds)
-        gauge.autoresizingMask = [.width, .height]
+        // GlassRoot centers this fixed-size gauge during its appearance animation.
         gauge.onDragged = { [weak self] in self?.didDrag() }
         gauge.onClick = { [weak self] in self?.showDetails() }
         gauge.onMenu = { [weak self] in self?.showDetails() }
-        gauge.onInteractionChanged = { [weak self] active in self?.isInteracting = active }
+        gauge.onInteractionChanged = { [weak self] active in
+            self?.isInteracting = active
+            if active { self?.glassRoot.finishReveal() }
+        }
         glassRoot.body.addSubview(gauge)
     }
 
@@ -246,8 +253,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func positionPanel() {
         if isInteracting { return }
-        guard mode != "menu" else { panel.orderOut(nil); return }
+        guard mode != "menu" else {
+            stopPlacementRetry(); resetPendingDock(); hidePanel(); return
+        }
         if mode == "free" {
+            stopPlacementRetry(); resetPendingDock()
+            glassRoot.finishReveal()
             if !panel.isVisible {
                 if let freeOrigin { panel.setFrameOrigin(freeOrigin) }
                 if let screen = NSScreen.main, panel.frame.intersection(screen.visibleFrame).isEmpty {
@@ -257,9 +268,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             return
         }
-        if menuOpen { return }
-        guard hostIsFrontmost(), let selection = windowTracker.selection() else {
-            panel.orderOut(nil); lastWindow = nil; lastWindowID = nil; hostBlocked = false
+        if menuOpen { stopPlacementRetry(); return }
+        guard hostIsFrontmost() else {
+            stopPlacementRetry(); resetPendingDock()
+            hidePanel(); lastWindow = nil; lastWindowID = nil; hostBlocked = false
+            writeDiagnostics(); return
+        }
+        guard let selection = windowTracker.selection() else {
+            // An activating Stage Manager host initially exists only as a thumbnail.
+            // Keep an activation retry alive while waiting for an eligible main frame.
+            resetPendingDock()
+            hidePanel(); lastWindow = nil; lastWindowID = nil; hostBlocked = false
             writeDiagnostics(); return
         }
         let window = selection.window.frame
@@ -267,16 +286,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastWindowID = selection.window.id
         hostBlocked = selection.blocked
         // Hide during host-owned dialogs. Do not move to or float above the file picker.
-        guard !selection.blocked else { panel.orderOut(nil); writeDiagnostics(); return }
+        guard !selection.blocked else {
+            stopPlacementRetry(); resetPendingDock(); hidePanel(); writeDiagnostics(); return
+        }
+        // WindowServer reports the intermediate, transformed host bounds during app
+        // switching. They can already exceed our minimum window size. Never reveal
+        // the panel at that temporary anchor and wait half a second to correct it.
+        if !panel.isVisible && !dockedFrameIsSettled(selection.window) {
+            schedulePlacementRetry(); writeDiagnostics(); return
+        }
         let anchor = WidgetLayout.anchor(in: window)
         var point = anchor
         point.x = min(max(point.x, window.minX + 2), window.maxX - panel.frame.width - 2)
         point.y = min(max(point.y, window.minY + 2), window.maxY - panel.frame.height - 40)
         if abs(panel.frame.minX - point.x) > 0.5 || abs(panel.frame.minY - point.y) > 0.5 { panel.setFrameOrigin(point) }
+        if !panel.isVisible { glassRoot.reveal() }
         // Stay just above the host, at its normal window level. A newly opened system
         // dialog can cover the widget immediately, even before the next positioning tick.
         panel.order(.above, relativeTo: Int(selection.window.id))
+        stopPlacementRetry(); resetPendingDock()
         writeDiagnostics()
+    }
+
+    private func hidePanel() {
+        panel.orderOut(nil)
+        glassRoot.finishReveal()
+    }
+
+    private func dockedFrameIsSettled(_ window: CodexWindowTracker.Window) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        if pendingDockWindow?.id != window.id || pendingDockWindow?.pid != window.pid ||
+           pendingDockWindow?.frame != window.frame {
+            pendingDockWindow = window
+            pendingDockStableSince = now
+            return false
+        }
+        return now - (pendingDockStableSince ?? now) >= 0.12
+    }
+
+    private func resetPendingDock() {
+        pendingDockWindow = nil
+        pendingDockStableSince = nil
+    }
+
+    private func schedulePlacementRetry() {
+        guard placementRetry == nil else { return }
+        // Only sample densely during activation/restoration. Missing hosts or a
+        // continuously moving window cannot leave a permanent high-frequency timer.
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                self.stopPlacementRetry(); return
+            }
+            self.positionPanel()
+        }
+        placementRetry = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopPlacementRetry() {
+        placementRetry?.invalidate()
+        placementRetry = nil
     }
 
     private func didDrag() {
@@ -313,6 +384,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "codexWindowID": lastWindowID as Any? ?? NSNull(), "hostDialogVisible": hostBlocked,
             "codexWindowFrame": lastWindow.map(NSStringFromRect) as Any? ?? NSNull(),
             "nativeLiquidGlass": glassRoot.nativeGlass,
+            "revealDurationMilliseconds": Int(GlassRoot.revealDuration * 1000),
+            "isRevealing": glassRoot.isRevealing,
             "updatedAt": updatedAt.map { ISO8601DateFormatter().string(from: $0) } as Any? ?? NSNull(),
             "fiveHourRemainingPercent": payload?.window(minutes: 300)?.remainingPercent as Any? ?? NSNull(),
             "weeklyRemainingPercent": payload?.window(minutes: 10080)?.remainingPercent as Any? ?? NSNull(),
@@ -324,12 +397,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func showDetails() {
+        glassRoot.finishReveal()
         render()
         menu.popUp(positioning: menu.items.first, at: NSPoint(x: gauge.bounds.maxX + 8, y: -8), in: gauge)
     }
     @objc private func refreshNow() { client.refresh() }
-    @objc private func didWake() { client.refresh(); positionPanel() }
-    @objc private func hostActivationChanged() { positionPanel() }
+    @objc private func didWake() { client.refresh(); hostActivationChanged() }
+    @objc private func hostActivationChanged() {
+        positionPanel()
+        if mode == "follow", hostIsFrontmost(), !panel.isVisible, !hostBlocked {
+            schedulePlacementRetry()
+        }
+    }
     @objc private func followMode() { changeMode("follow") }
     @objc private func freeMode() { changeMode("free") }
     @objc private func menuMode() { changeMode("menu") }
@@ -339,7 +418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {
-        ticker?.invalidate(); poller?.invalidate(); client.stop()
+        ticker?.invalidate(); poller?.invalidate(); stopPlacementRetry(); glassRoot?.finishReveal(); client.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 }

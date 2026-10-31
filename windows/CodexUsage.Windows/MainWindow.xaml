@@ -4,7 +4,9 @@
         Title="Codex Usage" Width="48" Height="84" WindowStyle="None" ResizeMode="NoResize"
         AllowsTransparency="True" Background="Transparent" Topmost="True" ShowInTaskbar="False"
         ShowActivated="False" UseLayoutRounding="True">
-  <Border Margin="3" CornerRadius="18" BorderThickness="0.7" BorderBrush="#B3FFFFFF"
+  <Grid>
+  <Border x:Name="Capsule" Width="42" Height="78" HorizontalAlignment="Center" VerticalAlignment="Center"
+          CornerRadius="18" BorderThickness="0.7" BorderBrush="#B3FFFFFF" ClipToBounds="True"
           MouseLeftButtonDown="PointerDown" MouseMove="PointerMove" MouseLeftButtonUp="PointerUp"
           MouseRightButtonUp="OpenDetails" Cursor="Hand">
     <Border.Background>
@@ -13,7 +15,7 @@
         <GradientStop Color="#BDE9F3F1" Offset="1"/>
       </LinearGradientBrush>
     </Border.Background>
-    <Grid>
+    <Grid x:Name="QuotaContent" Width="40.6" Height="76.6" HorizontalAlignment="Center" VerticalAlignment="Center">
       <Grid.RowDefinitions><RowDefinition Height="38"/><RowDefinition Height="1"/><RowDefinition Height="37"/></Grid.RowDefinitions>
       <StackPanel Grid.Row="0" VerticalAlignment="Center">
         <TextBlock Text="5h" FontSize="8" Foreground="#697A7B" HorizontalAlignment="Center"/>
@@ -26,4 +28,5 @@
       </StackPanel>
     </Grid>
   </Border>
+  </Grid>
 </Window>

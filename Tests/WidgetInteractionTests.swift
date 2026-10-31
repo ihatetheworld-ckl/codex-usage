@@ -81,6 +81,8 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
         panel.orderOut(nil)
         verifyFreeModePersistence()
         verifyHostWindowIdentity()
+        verifyActivationAnimationFrames()
+        verifyPointReveal()
         verifyNativeFilePanel()
         print("PASS: \(checks) native menu and window gesture checks")
         NSApp.terminate(nil)
@@ -191,6 +193,129 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
         check(tracker.selection()?.window.id == 103, "a replacement host is accepted after the original closes")
     }
 
+    private func verifyActivationAnimationFrames() {
+        let settings = UserDefaults.standard
+        let savedMode = settings.object(forKey: "displayMode")
+        defer {
+            if let savedMode { settings.set(savedMode, forKey: "displayMode") }
+            else { settings.removeObject(forKey: "displayMode") }
+        }
+        settings.set("follow", forKey: "displayMode")
+        let screen = NSScreen.main!.visibleFrame
+        let host = NSWindow(contentRect: NSRect(x: screen.minX + 80, y: screen.minY + 70, width: 1000, height: 680),
+                            styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        host.title = "Codex Usage activation regression host"
+        host.isReleasedWhenClosed = false
+        host.makeKeyAndOrderFront(nil)
+        var frontmost = true
+        var reportedFrame = host.frame
+        let tracker = CodexWindowTracker(snapshot: {
+            [CodexWindowTracker.Window(id: CGWindowID(host.windowNumber), pid: ProcessInfo.processInfo.processIdentifier,
+                                       frame: reportedFrame, onScreen: true)]
+        })
+        let oldIDs = Set(NSApp.windows.map(\.windowNumber))
+        let subject = AppDelegate(windowTracker: tracker, hostIsFrontmost: { frontmost })
+        subject.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        guard let floating = NSApp.windows.first(where: {
+            $0.title == "Codex 剩余用量" && !oldIDs.contains($0.windowNumber)
+        }) else { check(false, "activation test creates its own docked panel"); return }
+        check(waitFor { floating.isVisible }, "a stable host eventually shows the docked panel")
+        guard let appearance = floating.contentView as? GlassRoot else {
+            check(false, "the activation panel uses native animated glass"); return
+        }
+        check(waitFor { !appearance.isRevealing }, "initial appearance finishes")
+        let settledFrame = host.frame
+        let expected = WidgetLayout.anchor(in: settledFrame)
+        check(floating.frame.origin == expected, "initial stable placement uses the actual host anchor")
+
+        for cycle in 1...3 {
+            frontmost = false
+            subject.positionPanel()
+            check(!floating.isVisible, "switching away hides the docked panel in cycle \(cycle)")
+            reportedFrame = NSRect(x: settledFrame.minX + 33, y: settledFrame.minY + 41,
+                                   width: settledFrame.width - 100, height: settledFrame.height - 60)
+            frontmost = true
+            subject.positionPanel()
+            check(!floating.isVisible, "returning never displays the eligible but transient animation frame in cycle \(cycle)")
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.04))
+            reportedFrame = NSRect(x: settledFrame.minX + 5, y: settledFrame.minY + 4,
+                                   width: settledFrame.width - 10, height: settledFrame.height - 8)
+            subject.positionPanel()
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.04))
+            check(!floating.isVisible, "a changed animation frame restarts settling in cycle \(cycle)")
+            reportedFrame = settledFrame
+            subject.positionPanel()
+            check(!floating.isVisible, "the final frame is confirmed before presentation in cycle \(cycle)")
+            check(waitFor { floating.isVisible }, "the panel automatically returns after the host settles in cycle \(cycle)")
+            check(floating.frame.origin == expected, "the first visible frame is already at the final anchor in cycle \(cycle)")
+            check(appearance.isRevealing || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+                  "a restored panel starts its own content reveal in cycle \(cycle)")
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.035))
+            subject.positionPanel()
+            let progress = appearance.revealProgress
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.025))
+            subject.positionPanel()
+            check(appearance.revealProgress >= progress, "position updates do not restart appearance in cycle \(cycle)")
+            if cycle < 3 {
+                frontmost = false
+                subject.positionPanel()
+                check(!floating.isVisible && !appearance.isRevealing,
+                      "switching away mid-reveal immediately cancels it in cycle \(cycle)")
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.26))
+                check(!floating.isVisible, "a canceled appearance cannot resurrect the panel in cycle \(cycle)")
+            }
+        }
+        check(floating.animationBehavior == .none, "AppKit presentation animations cannot displace the docked panel")
+        subject.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        floating.orderOut(nil)
+        host.close()
+    }
+
+    private func verifyPointReveal() {
+        let host = NSPanel(contentRect: NSRect(x: 400, y: 250, width: 48, height: 84),
+                           styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        host.isOpaque = false; host.backgroundColor = .clear
+        let appearance = GlassRoot(size: WidgetLayout.size)
+        let content = CompactGauge(frame: appearance.body.bounds)
+        content.update(short: "72%", week: "88%", stale: false, tooltip: "animation regression")
+        appearance.body.addSubview(content)
+        host.contentView = appearance
+        host.orderFrontRegardless()
+        let fixedFrame = host.frame
+        check(GlassRoot.revealDuration == 0.240, "native reveal uses the requested 240 ms duration")
+        let started = ProcessInfo.processInfo.systemUptime
+        appearance.reveal(reduceMotion: false)
+        check(appearance.glassFrame.size == NSSize(width: 6, height: 6) && appearance.body.alphaValue == 0,
+              "appearance starts as a six-point dot with hidden text")
+        var samples = [(TimeInterval, NSRect, CGFloat)]()
+        repeat {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.008))
+            samples.append((ProcessInfo.processInfo.systemUptime - started, appearance.glassFrame, appearance.body.alphaValue))
+            check(host.frame == fixedFrame, "native appearance never changes the window anchor or size")
+            let visible = appearance.glassFrame
+            check(abs(visible.midX - appearance.bounds.midX) < 0.01 && abs(visible.midY - appearance.bounds.midY) < 0.01,
+                  "native glass expands around its fixed center")
+            check(content.frame.size == NSSize(width: 42, height: 78), "gauge text keeps its full-size canvas throughout reveal")
+        } while appearance.isRevealing && ProcessInfo.processInfo.systemUptime - started < 1
+        check(!appearance.isRevealing && appearance.revealProgress == 1, "native reveal completes and stops its timer")
+        check(samples.last!.0 >= 0.24 && samples.last!.0 < 0.4, "native appearance completes near the requested duration")
+        check(samples.filter { $0.0 < 0.09 }.allSatisfy { $0.2 == 0 }, "numbers stay hidden during the initial expansion")
+        check(samples.contains { $0.2 > 0 && $0.2 < 1 }, "numbers fade in rather than flash at full opacity")
+        check(zip(samples, samples.dropFirst()).allSatisfy { $0.1.width <= $1.1.width && $0.1.height <= $1.1.height },
+              "glass grows monotonically without a bounce or jump back")
+        check(appearance.glassFrame == appearance.bounds.insetBy(dx: 3, dy: 3) && appearance.body.alphaValue == 1,
+              "the completed animation restores the original glass geometry and readable values")
+        appearance.reveal(reduceMotion: false)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.04))
+        appearance.finishReveal()
+        check(!appearance.isRevealing && appearance.revealProgress == 1, "interaction cancels a partial reveal synchronously")
+        appearance.reveal(reduceMotion: true)
+        check(!appearance.isRevealing && appearance.body.alphaValue == 1,
+              "Reduce Motion presents readable content without geometric animation")
+        print("Point reveal duration:", samples.last!.0, "seconds;", samples.count, "native geometry samples")
+        host.orderOut(nil)
+    }
+
     private func verifyNativeFilePanel() {
         let settings = UserDefaults.standard
         let savedMode = settings.object(forKey: "displayMode")
@@ -220,6 +345,8 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
         let subject = AppDelegate(windowTracker: tracker, hostIsFrontmost: { true })
         subject.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         subject.positionPanel()
+        check(waitFor { NSApp.windows.contains { $0.title == "Codex 剩余用量" && $0.isVisible } },
+              "the native host settles before the docked panel is presented")
         guard let floating = NSApp.windows.first(where: { $0.title == "Codex 剩余用量" && $0.isVisible }) else {
             check(false, "docked widget is visible above a real native host"); return
         }
@@ -245,6 +372,7 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
         picker.cancel(nil)
         check(waitFor { tracker.selection()?.blocked == false }, "WindowServer removes the canceled picker")
         subject.positionPanel()
+        check(waitFor { floating.isVisible }, "the main host settles after canceling the picker")
         check(floating.isVisible && floating.frame.origin == anchor, "canceling the picker restores the widget to the same main anchor")
         host.setFrameOrigin(NSPoint(x: host.frame.minX + 24, y: host.frame.minY + 16))
         check(waitFor { tracker.selection()?.window.frame == host.frame }, "WindowServer reports the moved main host")
