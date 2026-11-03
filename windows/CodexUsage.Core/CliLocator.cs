@@ -130,6 +130,9 @@ public static class CliLocator
     private static CliCommand? Resolve(string path, IReadOnlyList<string> paths, string source)
     {
         if (!File.Exists(path)) return null;
+        // Resource paths may contain '/' on Windows, and a relative PATH/override
+        // would otherwise be resolved again from the child process's temp directory.
+        path = Path.GetFullPath(path);
         var extension = Path.GetExtension(path).ToLowerInvariant();
         if (extension is ".cmd" or ".bat" or ".js")
         {
@@ -138,7 +141,7 @@ public static class CliLocator
             if (!File.Exists(js)) return null;
             var node = new[] { Path.GetDirectoryName(path)! }.Concat(paths)
                 .SelectMany(directory => new[] { Path.Combine(directory, "node.exe"), Path.Combine(directory, "node") }).FirstOrDefault(File.Exists);
-            return node is null ? null : new(node, [js], source);
+            return node is null ? null : new(Path.GetFullPath(node), [js], source);
         }
         // Avoid launching the desktop GUI itself when it is named Codex.exe.
         if (Path.GetFileName(path).Equals("codex.exe", StringComparison.OrdinalIgnoreCase) &&

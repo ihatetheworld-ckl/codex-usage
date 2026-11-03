@@ -58,7 +58,7 @@ public sealed class CodexClient : IAsyncDisposable
             }
             if (!initialized)
             {
-                await RequestAsync("initialize", new { clientInfo = new { name = "codex_usage", title = "Codex Usage", version = "0.3.3" } }, cancellation).ConfigureAwait(false);
+                await RequestAsync("initialize", new { clientInfo = new { name = "codex_usage", title = "Codex Usage", version = "0.3.4" } }, cancellation).ConfigureAwait(false);
                 await WriteAsync(new { method = "initialized", @params = new { } }).ConfigureAwait(false);
                 initialized = true;
             }

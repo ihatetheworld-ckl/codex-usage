@@ -28,6 +28,8 @@ Release packaging cross-compiles `arm64` and `x86_64`, combines them with `lipo`
 
 Discovery regressions create real nested/versioned desktop, standalone and npm installation layouts, including spaces/non-ASCII paths and adjacent Node binaries. They check desktop-first selection, stale GUI PATH recovery, explicit overrides and rejection of a desktop GUI mistaken for the CLI. Actual subprocess cases cover missing quotas, a signed-out response, and explicit reconnection. Empty quota replies must produce an actionable error rather than a healthy `—` reading. Login launch arguments are checked without starting a login or capturing credentials.
 
+Resolved binary paths are normalized to absolute platform paths, including mixed separators on Windows. Relative CLI overrides must survive the child process's temporary working directory. These checks must pass on Windows itself; macOS cross-compilation alone did not catch the original separator mismatch.
+
 The Windows release job runs the published `CodexUsage.exe --self-test <report.json>` on a Windows runner. This initializes actual WPF/native windows, uses a native test-host window, exercises the same drag controller used by pointer handlers, checks docked snap-back and free-position restoration, opens the detail menu, verifies remaining text, and checks transparent corner pixels.
 
 The Windows smoke test does **not** use a real Codex account or a real Codex desktop host. In particular, CI cannot establish compatibility with every desktop installation path, organization login policy, Windows Store package, antivirus configuration, or mixed-DPI multi-monitor setup. A real-account check on the target Windows device is still needed.

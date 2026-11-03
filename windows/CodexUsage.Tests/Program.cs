@@ -56,6 +56,8 @@ try
     File.WriteAllText(Path.Combine(pathDirectory, "codex.exe"), "older fixture");
     var found = CliLocator.Find(null, [], [desktop], []);
     Check(found?.FileName == nestedCli && found.Source == "桌面版内置 CLI", "desktop-only nested CLI discovery without PATH or npm");
+    Check(CliLocator.Find(Path.GetRelativePath(Environment.CurrentDirectory, nestedCli), [], [], [])?.FileName == nestedCli,
+        "relative CLI selection is made absolute before using the child temp working directory");
     Check(CliLocator.Find(null, [pathDirectory], [desktop], [])?.FileName == nestedCli, "prefer desktop CLI over an older PATH installation");
     Check(CliLocator.Find(Path.Combine(temporary, "missing.exe"), [pathDirectory], [desktop], []) is null, "an invalid explicit override is not silently ignored");
     Check(CliLocator.Find(nestedCli, [], [], [])?.FileName == nestedCli, "explicit CLI with spaces and non-ASCII path");
