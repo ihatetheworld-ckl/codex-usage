@@ -11,6 +11,7 @@ internal sealed class Preferences
     public DisplayMode Mode { get; set; } = DisplayMode.Docked;
     public double? FreeX { get; set; }
     public double? FreeY { get; set; }
+    public string? CliPath { get; set; }
     private static string FileName => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsage", "settings.json");
     public static Preferences Load()
     {

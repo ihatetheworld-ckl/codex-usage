@@ -19,31 +19,74 @@ final class CodexWindowTracker {
         let blocked: Bool
     }
     private let snapshot: () -> [Window]?
+    private let clock: () -> TimeInterval
     private var boundWindow: Window?
+    private var mainWindows = Set<CGWindowID>()
+    private var dialogs = Set<CGWindowID>()
+    private var pendingDialogs: [CGWindowID: (Window, TimeInterval)] = [:]
+    var hasPendingDialogs: Bool { !pendingDialogs.isEmpty }
 
-    init(snapshot: @escaping () -> [Window]? = CodexWindowTracker.codexWindows) {
+    init(snapshot: @escaping () -> [Window]? = CodexWindowTracker.codexWindows,
+         clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.snapshot = snapshot
+        self.clock = clock
     }
 
     func selection() -> Selection? {
         guard let windows = snapshot() else { return nil }
+        let alive = Set(windows.map(\.id))
+        mainWindows.formIntersection(alive)
+        dialogs.formIntersection(alive)
+        pendingDialogs = pendingDialogs.filter { alive.contains($0.key) }
         if let bound = boundWindow,
            !windows.contains(where: { $0.id == bound.id && $0.pid == bound.pid }) {
             boundWindow = nil
         }
-        if boundWindow == nil {
-            // Sheets and file panels precede their parent in front-to-back order, including
-            // when the widget starts while a panel is already open. Start with the backmost
-            // eligible host, and retain it until it actually closes (not when minimized).
-            boundWindow = windows.last(where: { $0.onScreen && $0.frame.width >= 500 && $0.frame.height >= 300 })
+        // WindowServer does not expose main-vs-sheet roles without Accessibility access.
+        // Recognize inset dialogs against their larger parent, then retain that identity
+        // while the dialog moves/resizes. Already known main windows keep their role.
+        var tentativeDialogs = Set<CGWindowID>()
+        for (index, window) in windows.enumerated() where !mainWindows.contains(window.id) && !dialogs.contains(window.id) {
+            let inset = window.onScreen && Self.isMainSized(window) && windows.dropFirst(index + 1).contains(where: { parent in
+                guard parent.pid == window.pid, parent.onScreen, Self.isMainSized(parent),
+                      parent.frame.width >= window.frame.width,
+                      parent.frame.height >= window.frame.height else { return false }
+                let area = window.frame.width * window.frame.height
+                let overlap = parent.frame.intersection(window.frame)
+                return area > 0 && area < parent.frame.width * parent.frame.height * 0.8 &&
+                    overlap.width * overlap.height >= area * 0.9 &&
+                    abs(parent.frame.midX - window.frame.midX) <= max(32, parent.frame.width * 0.04)
+            })
+            guard inset else { pendingDialogs.removeValue(forKey: window.id); continue }
+            tentativeDialogs.insert(window.id)
+            if let pending = pendingDialogs[window.id], pending.0.pid == window.pid, pending.0.frame == window.frame {
+                if clock() - pending.1 >= 0.12 { dialogs.insert(window.id); pendingDialogs.removeValue(forKey: window.id) }
+            } else { pendingDialogs[window.id] = (window, clock()) }
         }
+        let candidates = windows.filter { $0.onScreen && Self.isMainSized($0) && !dialogs.contains($0.id) && !tentativeDialogs.contains($0.id) }
+        // Follow the visible main window, even when the previous host is minimized,
+        // on another Space, or behind another main window. It must not remain latched
+        // to an invisible host and classify every other window as a blocking dialog.
+        mainWindows.formUnion(candidates.map(\.id))
+        if let foregroundMain = candidates.first { boundWindow = foregroundMain }
         guard let bound = boundWindow,
               let index = windows.firstIndex(where: { $0.id == bound.id && $0.pid == bound.pid }),
-              windows[index].onScreen, windows[index].frame.width >= 500, windows[index].frame.height >= 300 else { return nil }
+              windows[index].onScreen, Self.isMainSized(windows[index]) else { return nil }
         boundWindow = windows[index]
         return Selection(window: windows[index], blocked: windows[..<index].contains {
-            $0.onScreen && $0.pid == bound.pid && $0.frame.width > 1 && $0.frame.height > 1
+            // Tiny helper/tooltip windows are not modal dialogs. A helper can remain
+            // ordered above the main window long after a menu has been dismissed.
+            $0.onScreen && $0.pid == bound.pid && !mainWindows.contains($0.id) &&
+                $0.frame.width >= 160 && $0.frame.height >= 80 && $0.frame.intersects(windows[index].frame)
         })
+    }
+
+    func reset() {
+        boundWindow = nil; mainWindows.removeAll(); dialogs.removeAll(); pendingDialogs.removeAll()
+    }
+
+    private static func isMainSized(_ window: Window) -> Bool {
+        window.frame.width >= 500 && window.frame.height >= 300
     }
 
     static func codexWindows() -> [Window]? {
@@ -52,10 +95,17 @@ final class CodexWindowTracker {
     }
 
     static func windows(processIDs: Set<Int32>) -> [Window]? {
-        // Include off-screen windows so minimizing the main window cannot rebind to a dialog.
-        guard let entries = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+        if processIDs.isEmpty { return [] }
+        // Only optionOnScreenOnly guarantees front-to-back ordering. optionAll is
+        // solely an existence inventory for retaining minimized/off-Space identities.
+        guard let visible = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              let all = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
               let primaryTop = NSScreen.screens.first?.frame.maxY else { return nil }
-        return entries.compactMap { entry in
+        let visibleIDs = Set(visible.compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        let entries = visible.map { ($0, true) } + all.filter {
+            !visibleIDs.contains($0[kCGWindowNumber as String] as? CGWindowID ?? kCGNullWindowID)
+        }.map { ($0, false) }
+        return entries.compactMap { entry, onScreen in
             guard let pid = entry[kCGWindowOwnerPID as String] as? Int32, processIDs.contains(pid),
                   entry[kCGWindowLayer as String] as? Int == 0,
                   let id = entry[kCGWindowNumber as String] as? CGWindowID,
@@ -64,7 +114,7 @@ final class CodexWindowTracker {
                   width > 1, height > 1 else { return nil }
             return Window(id: id, pid: pid,
                           frame: NSRect(x: x, y: primaryTop - y - height, width: width, height: height),
-                          onScreen: entry[kCGWindowIsOnscreen as String] as? Bool ?? false)
+                          onScreen: onScreen && (entry[kCGWindowAlpha as String] as? CGFloat ?? 1) > 0.01)
         }
     }
 }
@@ -93,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastWindow: NSRect?
     private var lastWindowID: CGWindowID?
     private var hostBlocked = false
+    private var placementReason = "starting"
     private var freeOrigin: NSPoint? = {
         let settings = UserDefaults.standard
         guard settings.object(forKey: "freeX") != nil, settings.object(forKey: "freeY") != nil else { return nil }
@@ -141,6 +192,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         poller = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.client.refresh() }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(hostActivationChanged), name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(hostActivationChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(hostActivationChanged), name: NSWorkspace.didUnhideApplicationNotification, object: nil)
         render(); positionPanel(); client.refresh()
         if let raw = ProcessInfo.processInfo.environment["CODEX_USAGE_QUIT_AFTER"], let seconds = Double(raw), seconds > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { NSApp.terminate(nil) }
@@ -183,6 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addMenu("自由悬浮", action: #selector(freeMode), checked: mode == "free")
         addMenu("仅菜单栏", action: #selector(menuMode), checked: mode == "menu")
         addMenu("恢复左下角位置", action: #selector(resetPosition))
+        addMenu("复制显示诊断信息", action: #selector(copyPlacementDiagnostics))
         menu.addItem(.separator())
         addMenu("退出 Codex Usage", action: #selector(quit), key: "q")
         statusItem.menu = menu
@@ -252,12 +306,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func positionPanel() {
+        // A lost mouse-up or a menu-tracking interruption must never prevent hiding
+        // and recovery on the next app switch.
+        if mode == "follow" && !hostIsFrontmost() {
+            gauge.cancelInteraction()
+            if menuOpen { menu.cancelTrackingWithoutAnimation(); menuOpen = false }
+            isInteracting = false
+            stopPlacementRetry(); resetPendingDock()
+            hidePanel(); lastWindow = nil; lastWindowID = nil; hostBlocked = false
+            placementReason = "host-background"; writeDiagnostics(); return
+        }
         if isInteracting { return }
         guard mode != "menu" else {
-            stopPlacementRetry(); resetPendingDock(); hidePanel(); return
+            stopPlacementRetry(); resetPendingDock(); hidePanel(); placementReason = "menu-only"; return
         }
         if mode == "free" {
             stopPlacementRetry(); resetPendingDock()
+            placementReason = "free"
             glassRoot.finishReveal()
             if !panel.isVisible {
                 if let freeOrigin { panel.setFrameOrigin(freeOrigin) }
@@ -272,28 +337,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard hostIsFrontmost() else {
             stopPlacementRetry(); resetPendingDock()
             hidePanel(); lastWindow = nil; lastWindowID = nil; hostBlocked = false
-            writeDiagnostics(); return
+            placementReason = "host-background"; writeDiagnostics(); return
         }
         guard let selection = windowTracker.selection() else {
             // An activating Stage Manager host initially exists only as a thumbnail.
             // Keep an activation retry alive while waiting for an eligible main frame.
             resetPendingDock()
             hidePanel(); lastWindow = nil; lastWindowID = nil; hostBlocked = false
-            writeDiagnostics(); return
+            placementReason = "no-visible-main-window"; writeDiagnostics(); return
         }
         let window = selection.window.frame
+        if let previous = lastWindowID, previous != selection.window.id {
+            // Switching between main windows needs the same stable-frame gate as activation.
+            hidePanel(); resetPendingDock()
+        }
         lastWindow = window
         lastWindowID = selection.window.id
         hostBlocked = selection.blocked
         // Hide during host-owned dialogs. Do not move to or float above the file picker.
         guard !selection.blocked else {
-            stopPlacementRetry(); resetPendingDock(); hidePanel(); writeDiagnostics(); return
+            if windowTracker.hasPendingDialogs { schedulePlacementRetry() } else { stopPlacementRetry() }
+            resetPendingDock(); hidePanel(); placementReason = "host-dialog"; writeDiagnostics(); return
         }
         // WindowServer reports the intermediate, transformed host bounds during app
         // switching. They can already exceed our minimum window size. Never reveal
         // the panel at that temporary anchor and wait half a second to correct it.
         if !panel.isVisible && !dockedFrameIsSettled(selection.window) {
-            schedulePlacementRetry(); writeDiagnostics(); return
+            schedulePlacementRetry(); placementReason = "waiting-for-stable-frame"; writeDiagnostics(); return
         }
         let anchor = WidgetLayout.anchor(in: window)
         var point = anchor
@@ -305,6 +375,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // dialog can cover the widget immediately, even before the next positioning tick.
         panel.order(.above, relativeTo: Int(selection.window.id))
         stopPlacementRetry(); resetPendingDock()
+        placementReason = "visible"
         writeDiagnostics()
     }
 
@@ -382,6 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "isDragging": isInteracting, "detailDrawCount": details.drawCount,
             "panelFrame": NSStringFromRect(panel.frame), "codexWindowFound": lastWindow != nil,
             "codexWindowID": lastWindowID as Any? ?? NSNull(), "hostDialogVisible": hostBlocked,
+            "placementReason": placementReason,
             "codexWindowFrame": lastWindow.map(NSStringFromRect) as Any? ?? NSNull(),
             "nativeLiquidGlass": glassRoot.nativeGlass,
             "revealDurationMilliseconds": Int(GlassRoot.revealDuration * 1000),
@@ -414,7 +486,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func menuMode() { changeMode("menu") }
     @objc private func resetPosition() {
         UserDefaults.standard.removeObject(forKey: "offsetX"); UserDefaults.standard.removeObject(forKey: "offsetY")
+        windowTracker.reset(); resetPendingDock()
         changeMode("follow")
+    }
+    @objc private func copyPlacementDiagnostics() {
+        let serverWindows = CGWindowListCopyWindowInfo(.optionIncludingWindow, CGWindowID(panel.windowNumber)) as? [[String: Any]]
+        let fields: [String: Any] = [
+            "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development",
+            "mode": mode, "panelVisible": panel.isVisible, "reason": placementReason,
+            "hostWindowID": lastWindowID as Any? ?? NSNull(),
+            "hostFrame": lastWindow.map(NSStringFromRect) as Any? ?? NSNull(),
+            "panelFrame": NSStringFromRect(panel.frame), "isInteracting": isInteracting, "menuOpen": menuOpen,
+            "hostFrontmost": hostIsFrontmost(), "windowLevel": panel.level.rawValue,
+            "windowServerVisible": serverWindows?.first(where: {
+                $0[kCGWindowNumber as String] as? CGWindowID == CGWindowID(panel.windowNumber)
+            })?[kCGWindowIsOnscreen as String] as Any? ?? NSNull()
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .prettyPrinted]),
+           let text = String(data: data, encoding: .utf8) {
+            NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+        }
     }
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {

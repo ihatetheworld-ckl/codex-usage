@@ -91,6 +91,8 @@ internal static class WindowsSmokeTest
                 var content = menu.Items.OfType<StackPanel>().Single();
                 Check(content.ActualHeight > 100, "Details are blank or collapsed");
                 Check(content.Children.OfType<DockPanel>().SelectMany(row => row.Children.OfType<TextBlock>()).Any(label => label.Text == "75%"), "Remaining quota is absent from details");
+                Check(menu.Items.OfType<MenuItem>().Any(item => item.Header?.ToString() == "登录 Codex 账户…") &&
+                      menu.Items.OfType<MenuItem>().Any(item => item.Header?.ToString() == "选择 Codex CLI…"), "Connection recovery must be reachable from the real tray/details menu");
                 menu.IsOpen = false;
                 var bitmap = new RenderTargetBitmap(96, 168, 192, 192, PixelFormats.Pbgra32);
                 widget.UpdateLayout(); bitmap.Render(widget);

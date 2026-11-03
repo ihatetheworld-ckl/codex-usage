@@ -8,6 +8,10 @@
 
 It also opens an actual `NSOpenPanel` sheet on a native test host. It checks that the docked widget retains the main window's identity, hides during the picker, returns on cancellation, follows subsequent host movement, and keeps the floating level in free mode. WindowServer registration is awaited rather than assumed synchronous. Snapshot regressions cover startup with an already-open picker, temporary snapshot failure, minimization/restoration, and replacement of a closed host.
 
+Recovery regressions cover another main window in front of a still-existing host, an old off-screen host, tiny persistent helpers, and a lost mouse-up followed by app switching. Native coverage creates an actual helper window and a second main window. Dialog classification uses metadata and learned identities without requesting Accessibility access; geometrically ambiguous windows remain a limitation. The user's original intermittent disappearance did not have a deterministic reproduction, so these checks establish the covered failure paths rather than proving every possible disappearance is eliminated.
+
+Visible window order comes from `optionOnScreenOnly`; `optionAll` is used only to retain off-screen identities. Dialog identities are learned only after their geometry settles, so transient main-window animation rectangles cannot become permanent dialog identities. Switching between main-window identities also passes through the stable-frame presentation gate.
+
 Activation regression coverage supplies changing, full-sized intermediate host frames like those reported during Stage Manager restoration. Across three switch-away/return cycles, it checks that the panel remains hidden through those frames and appears automatically at the settled anchor. It also verifies that AppKit presentation animations are disabled for the panel. This regression fails against the earlier implementation even though the temporary host frames exceed the minimum window size.
 
 Appearance uses a 240 ms native glass expansion from a centered six-point dot, with delayed text opacity. The native UI regression samples the actual glass and window frames, verifies fixed window coordinates, unscaled gauge content, monotonic growth, delayed text, completion timing, synchronous cancellation, and Reduce Motion. Activation coverage also interrupts appearances and confirms that ordinary positioning does not restart them or a canceled timer show the panel again. The display-cadence timer exists only while a reveal is running.
@@ -21,6 +25,8 @@ Release packaging cross-compiles `arm64` and `x86_64`, combines them with `lipo`
 ## Windows
 
 `dotnet run --project windows/CodexUsage.Tests -c Release` checks the quota parser and actual subprocess transport. It runs on macOS or Windows without a real account.
+
+Discovery regressions create real nested/versioned desktop, standalone and npm installation layouts, including spaces/non-ASCII paths and adjacent Node binaries. They check desktop-first selection, stale GUI PATH recovery, explicit overrides and rejection of a desktop GUI mistaken for the CLI. Actual subprocess cases cover missing quotas, a signed-out response, and explicit reconnection. Empty quota replies must produce an actionable error rather than a healthy `—` reading. Login launch arguments are checked without starting a login or capturing credentials.
 
 The Windows release job runs the published `CodexUsage.exe --self-test <report.json>` on a Windows runner. This initializes actual WPF/native windows, uses a native test-host window, exercises the same drag controller used by pointer handlers, checks docked snap-back and free-position restoration, opens the detail menu, verifies remaining text, and checks transparent corner pixels.
 

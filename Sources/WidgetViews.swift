@@ -192,10 +192,14 @@ final class CompactGauge: NSView {
     override func mouseUp(with event: NSEvent) {
         guard pressPoint != nil else { return }
         let wasDragged = dragged
+        cancelInteraction()
+        if wasDragged { onDragged?() } else { onClick?() }
+    }
+    func cancelInteraction() {
+        let wasPressed = pressPoint != nil
         pressPoint = nil; pressOrigin = nil; dragged = false
         if dragCursor { NSCursor.pop(); dragCursor = false }
-        onInteractionChanged?(false)
-        if wasDragged { onDragged?() } else { onClick?() }
+        if wasPressed { onInteractionChanged?(false) }
     }
     override func rightMouseDown(with event: NSEvent) { onMenu?() }
     override func accessibilityPerformPress() -> Bool { onClick?(); return true }

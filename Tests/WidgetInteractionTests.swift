@@ -81,6 +81,7 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
         panel.orderOut(nil)
         verifyFreeModePersistence()
         verifyHostWindowIdentity()
+        verifyWindowRecovery()
         verifyActivationAnimationFrames()
         verifyPointReveal()
         verifyNativeFilePanel()
@@ -193,6 +194,48 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
         check(tracker.selection()?.window.id == 103, "a replacement host is accepted after the original closes")
     }
 
+    private func verifyWindowRecovery() {
+        typealias Window = CodexWindowTracker.Window
+        let main = Window(id: 401, pid: 7, frame: NSRect(x: 80, y: 80, width: 1200, height: 800), onScreen: true)
+        let second = Window(id: 402, pid: 7, frame: NSRect(x: 100, y: 100, width: 1280, height: 900), onScreen: true)
+        var windows: [Window]? = [main]
+        var now: TimeInterval = 0
+        let tracker = CodexWindowTracker(snapshot: { windows }, clock: { now })
+        check(tracker.selection()?.window.id == main.id, "recovery starts on the original host")
+        let helper = Window(id: 403, pid: 7, frame: NSRect(x: 120, y: 160, width: 14, height: 12), onScreen: true)
+        windows = [helper, main]
+        check(tracker.selection()?.blocked == false, "a tiny persistent helper cannot hide the capsule")
+        windows = [second, main]
+        check(tracker.selection()?.window.id == second.id && tracker.selection()?.blocked == false,
+              "a new foreground main window replaces the old visible host instead of being treated as a dialog")
+        windows = [main, second]
+        check(tracker.selection()?.window.id == main.id, "switching back between learned main windows restores docking")
+        let hidden = Window(id: main.id, pid: main.pid, frame: main.frame, onScreen: false)
+        let smaller = Window(id: 404, pid: 7, frame: NSRect(x: 120, y: 160, width: 700, height: 440), onScreen: true)
+        windows = [smaller, hidden]
+        check(tracker.selection()?.window.id == smaller.id, "an invisible old main cannot trap docking to another visible main")
+        let picker = Window(id: 405, pid: 7, frame: NSRect(x: 200, y: 190, width: 540, height: 300), onScreen: true)
+        windows = [picker, smaller, hidden]
+        check(tracker.selection()?.window.id == smaller.id && tracker.selection()?.blocked == true,
+              "file pickers still suppress the newly selected host")
+        now += 0.2
+        _ = tracker.selection()
+        windows = [Window(id: picker.id, pid: picker.pid, frame: NSRect(x: 0, y: 0, width: 1500, height: 1000), onScreen: true), smaller, hidden]
+        check(tracker.selection()?.window.id == smaller.id && tracker.selection()?.blocked == true,
+              "resizing a recognized picker does not turn it into a main window")
+        windows = [smaller, hidden]
+        check(tracker.selection()?.blocked == false, "dismissal restores a replacement host")
+        tracker.reset()
+        windows = [main]
+        check(tracker.selection()?.window.id == main.id, "explicit reset discards stale host and dialog identities")
+        windows = [Window(id: 406, pid: 7, frame: NSRect(x: 430, y: 280, width: 500, height: 350), onScreen: true), main]
+        check(tracker.selection()?.blocked == true, "an inset intermediate animation frame is quarantined")
+        now += 0.04
+        windows = [Window(id: 406, pid: 7, frame: second.frame, onScreen: true), main]
+        check(tracker.selection()?.window.id == 406 && tracker.selection()?.blocked == false,
+              "a transient main-window animation cannot permanently classify it as a dialog")
+    }
+
     private func verifyActivationAnimationFrames() {
         let settings = UserDefaults.standard
         let savedMode = settings.object(forKey: "displayMode")
@@ -265,6 +308,12 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
                 check(!floating.isVisible, "a canceled appearance cannot resurrect the panel in cycle \(cycle)")
             }
         }
+        let press = NSPoint(x: floating.frame.midX, y: floating.frame.midY)
+        send(.leftMouseDown, at: press, to: floating)
+        frontmost = false; subject.positionPanel()
+        check(!floating.isVisible, "losing activation during a held gesture cannot freeze visibility")
+        frontmost = true; subject.positionPanel()
+        check(waitFor { floating.isVisible }, "a lost mouse-up cannot prevent the next activation from restoring the capsule")
         check(floating.animationBehavior == .none, "AppKit presentation animations cannot displace the docked panel")
         subject.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
         floating.orderOut(nil)
@@ -352,6 +401,17 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
         }
         let anchor = WidgetLayout.anchor(in: host.frame)
         check(floating.frame.origin == anchor && floating.level == .normal, "docked window uses the main host's anchor and normal level")
+        let helper = NSWindow(contentRect: NSRect(x: host.frame.minX + 80, y: host.frame.minY + 80, width: 14, height: 12),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        helper.isReleasedWhenClosed = false
+        allowedIDs.insert(CGWindowID(helper.windowNumber))
+        helper.orderFrontRegardless()
+        check(waitFor { CodexWindowTracker.windows(processIDs: [ProcessInfo.processInfo.processIdentifier])?.contains {
+            $0.id == CGWindowID(helper.windowNumber) && $0.onScreen
+        } == true }, "WindowServer exposes a real helper above the native host")
+        subject.positionPanel()
+        check(floating.isVisible, "a real persistent helper cannot suppress the docked capsule")
+        helper.close()
         picker.beginSheetModal(for: host) { _ in }
         allowedIDs.insert(CGWindowID(picker.windowNumber))
         let pickerReady = waitFor { picker.isVisible && tracker.selection()?.blocked == true }
@@ -378,6 +438,25 @@ final class WidgetInteractionTests: NSObject, NSApplicationDelegate {
         check(waitFor { tracker.selection()?.window.frame == host.frame }, "WindowServer reports the moved main host")
         subject.positionPanel()
         check(floating.frame.origin == WidgetLayout.anchor(in: host.frame), "normal following still works after canceling the picker")
+        let secondHost = NSWindow(contentRect: NSRect(x: screen.minX + 50, y: screen.minY + 45, width: 1100, height: 720),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        secondHost.isReleasedWhenClosed = false
+        allowedIDs.insert(CGWindowID(secondHost.windowNumber))
+        secondHost.makeKeyAndOrderFront(nil)
+        secondHost.orderFrontRegardless()
+        let secondReady = waitFor { tracker.selection()?.window.id == CGWindowID(secondHost.windowNumber) }
+        if !secondReady { print("Second host:", secondHost.windowNumber, "selection:", tracker.selection() as Any,
+                               "windows:", CodexWindowTracker.windows(processIDs: [ProcessInfo.processInfo.processIdentifier]) as Any) }
+        check(secondReady, "a real second main window becomes the dock host")
+        subject.positionPanel()
+        check(waitFor { subject.positionPanel(); return floating.isVisible && floating.frame.origin == WidgetLayout.anchor(in: secondHost.frame) },
+              "a second native main window cannot permanently hide the capsule")
+        host.orderOut(nil)
+        subject.positionPanel()
+        check(floating.isVisible, "an old off-screen native main window cannot suppress the new host")
+        secondHost.close(); host.makeKeyAndOrderFront(nil)
+        check(waitFor { tracker.selection()?.window.id == CGWindowID(host.windowNumber) }, "closing the second main restores the original host")
+        subject.positionPanel()
         subject.perform(NSSelectorFromString("freeMode"))
         check(floating.level == .floating && floating.isVisible, "free-floating mode retains its independent floating level")
         subject.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))

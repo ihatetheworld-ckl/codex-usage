@@ -26,7 +26,9 @@ npm install -g @openai/codex
 codex login
 ```
 
-Launch Codex Usage, then bring the Codex / ChatGPT desktop window forward. The capsule appears in its lower-left rail. On Windows, install and sign in from native PowerShell: WSL uses a separate environment and does not automatically share its login state. A working desktop-app login does not guarantee that the CLI is signed in.
+Open and sign in to the Codex / ChatGPT desktop app, then launch Codex Usage. The capsule appears in the desktop window's lower-left rail. The widget prefers the desktop's bundled CLI and also supports standalone/PATH/npm installations. Windows discovery includes nested app resources, versioned installs, and the official standalone install directory. WSL uses a separate environment and does not automatically share its login state.
+
+If Windows shows `—` or a connection error, open the desktop app and select Refresh from the tray menu. The sign-in action launches the official CLI and refreshes on completion. A CLI file picker handles unusual installations; connection diagnostics copy only the source and error, without tokens. Install a standalone CLI if the desktop binary cannot be found.
 
 Use `CODEX_USAGE_CLI` for a nonstandard CLI location. Windows supports native `codex.exe` and conventional npm `codex.cmd` installations, invoking Node.js directly instead of interpolating a shell command.
 
@@ -37,6 +39,7 @@ Use `CODEX_USAGE_CLI` for a nonstandard CLI location. Windows supports native `c
 - **Docked:** follows the desktop window and snaps back to the lower-left corner when a drag is released.
 - **240 ms appearance:** grows from a centered dot into the capsule, then fades in its unscaled values. Switching away, clicking, or dragging cancels the animation; system reduced-motion preferences are respected.
 - **macOS restoration:** waits for the main window's Stage Manager expansion to settle before revealing, avoiding a temporary position followed by a jump to the final anchor.
+- **macOS recovery:** follows another visible main window, ignores tiny helper windows, and clears interrupted gestures/menu tracking when switching away. Reset-position and copy-display-diagnostics actions help recover or investigate intermittent hiding.
 - **macOS file dialogs:** keeps the main-window binding, hides while a system file picker is open, and returns to the main window's lower-left corner on dismissal.
 - **Free-floating:** keeps its dropped position, including across mode changes and restarts.
 - Menu-bar-only / tray-only mode, stale-data indication, and unknown values shown as `—`.
@@ -49,7 +52,7 @@ Quit before replacing the app or the entire portable folder to update. Startup r
 
 Reads `account/rateLimits/read` through the official [Codex App Server](https://learn.chatgpt.com/docs/app-server). The CLI manages its own authentication; this app does not read, copy or log tokens. It does not run model inference, create chats, capture your screen, inspect conversation text, or upload source code. It opens no network listener and requires no OpenAI API key.
 
-Only display preferences are saved. The Codex CLI still contacts OpenAI, manages its login and writes its usual local logs. Service-side readings can lag; a 30-second poll is not token-by-token accounting.
+Only display preferences and an optionally selected CLI path are saved. The Codex CLI still contacts OpenAI, manages its login and writes its usual local logs. Service-side readings can lag; a 30-second poll is not token-by-token accounting.
 
 ## Build
 
@@ -77,7 +80,7 @@ See [TESTING.md](docs/TESTING.md). Both platform jobs must succeed before a tag 
 
 macOS has been checked with a real account and native window interactions on Apple Silicon. The Intel slice is cross-compiled. Windows CI checks actual WPF startup, docking, its drag controller, details and transparent corners with synthetic quotas and a native test host. **A real-account check on the user's Windows device has not been completed.**
 
-The default dock assumes the desktop app's 56-point left rail. On macOS, docking stays bound to the initial main window until it closes, so newly opened file dialogs cannot become the host. Windows follows the foreground host window. App redesigns, hidden rails, unusual installation locations and mixed-DPI multi-monitor setups may require adaptation. The tool cannot distinguish Codex from other pages inside a shared ChatGPT desktop window. It does not select remote accounts or provide its own login flow.
+The default dock assumes the desktop app's 56-point left rail. macOS uses window metadata to follow visible main windows while retaining recognized file-dialog identities. Windows follows the foreground host window. App redesigns, hidden rails, unusual installation locations and mixed-DPI multi-monitor setups may require adaptation. The tool cannot distinguish Codex from other pages inside a shared ChatGPT desktop window. It does not select remote accounts. The Windows sign-in action delegates authentication to the official CLI rather than collecting credentials in this widget.
 
 Preferences: macOS `local.codex-usage-sidebar`; Windows `%LOCALAPPDATA%\CodexUsage\settings.json`. Quit and delete the application to uninstall, optionally removing these preferences.
 

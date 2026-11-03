@@ -14,7 +14,7 @@ namespace CodexUsage.Windows;
 
 public partial class MainWindow : Window
 {
-    private readonly CodexClient client = new();
+    private readonly CodexClient client;
     private readonly Preferences preferences;
     private readonly bool selfTest;
     private readonly Func<Rect?>? testHost;
@@ -40,6 +40,7 @@ public partial class MainWindow : Window
     {
         this.selfTest = selfTest; this.testHost = testHost;
         preferences = selfTest ? new() : Preferences.Load();
+        client = new CodexClient(locate: () => CliLocator.Find(preferences.CliPath));
         InitializeComponent();
         SourceInitialized += (_, _) => { NativeWindows.MakeNonActivating(this); Opacity = 0; };
         revealTimer.Tick += (_, _) =>
@@ -69,10 +70,14 @@ public partial class MainWindow : Window
         Closing += (_, _) => { shuttingDown = true; FinishReveal(); positionTimer.Stop(); quotaTimer.Stop(); tray?.Dispose(); client.DisposeAsync().AsTask().GetAwaiter().GetResult(); };
     }
 
-    private async Task RefreshAsync()
+    private async Task RefreshAsync(bool reconnect = false)
     {
         if (shuttingDown) return;
-        try { if (await client.ReadAsync() is { } value) { snapshot = value; error = null; } }
+        try
+        {
+            if (reconnect) await client.ReconnectAsync();
+            if (await client.ReadAsync() is { } value) { snapshot = value; error = null; }
+        }
         catch (UsageReadException failure) { error = failure.Message; if (failure.ClearSnapshot) snapshot = null; }
         catch (ObjectDisposedException) { return; }
         Render();
@@ -205,8 +210,13 @@ public partial class MainWindow : Window
         AddQuota(content, "本周剩余", snapshot?.Weekly);
         content.Children.Add(new TextBlock { Text = error ?? (snapshot is null ? "正在连接 Codex CLI…" : $"更新于 {snapshot.ReadAt.ToLocalTime():HH:mm:ss}"),
             FontSize = 10, Foreground = error is null ? Brushes.Gray : Brushes.DarkOrange, TextWrapping = TextWrapping.Wrap });
+        if (client.Source is { } source) content.Children.Add(new TextBlock { Text = source, FontSize = 10, Foreground = Brushes.Gray });
         menu.Items.Add(content); menu.Items.Add(new Separator());
-        AddAction(menu, "立即刷新", () => _ = RefreshAsync());
+        AddAction(menu, "立即刷新", () => _ = RefreshAsync(true));
+        AddAction(menu, "登录 Codex 账户…", () => _ = LoginAsync());
+        AddAction(menu, "选择 Codex CLI…", SelectCli);
+        AddAction(menu, "自动查找 Codex CLI", () => { preferences.CliPath = null; if (!selfTest) preferences.Save(); _ = RefreshAsync(true); });
+        AddAction(menu, "复制连接诊断", CopyConnectionDiagnostics);
         AddAction(menu, "贴合左下角（松手回位）", () => SetMode(DisplayMode.Docked), preferences.Mode == DisplayMode.Docked);
         AddAction(menu, "自由悬浮", () => SetMode(DisplayMode.Free), preferences.Mode == DisplayMode.Free);
         AddAction(menu, "仅系统托盘", () => SetMode(DisplayMode.TrayOnly), preferences.Mode == DisplayMode.TrayOnly);
@@ -231,6 +241,46 @@ public partial class MainWindow : Window
     {
         var item = new MenuItem { Header = title, IsChecked = selected };
         item.Click += (_, _) => action(); menu.Items.Add(item);
+    }
+
+    private void SelectCli()
+    {
+        var picker = new Microsoft.Win32.OpenFileDialog {
+            Title = "选择 Codex CLI（不是 ChatGPT 桌面程序）",
+            Filter = "Codex CLI|codex.exe;codex.cmd;codex.js|所有文件|*.*", CheckFileExists = true
+        };
+        if (picker.ShowDialog() != true) return;
+        preferences.CliPath = picker.FileName; if (!selfTest) preferences.Save();
+        _ = RefreshAsync(true);
+    }
+
+    private async Task LoginAsync()
+    {
+        try
+        {
+            var cli = await Task.Run(() => CliLocator.Find(preferences.CliPath))
+                ?? throw new UsageReadException("未找到 Codex CLI。请先打开桌面版或选择 CLI 文件。");
+            using var login = Process.Start(cli.CreateLoginStartInfo())
+                ?? throw new UsageReadException("无法打开登录窗口，请在桌面版中完成登录。");
+            error = "请在打开的官方 Codex 登录窗口中完成登录，完成后会自动刷新。"; Render();
+            await login.WaitForExitAsync();
+            if (!shuttingDown) await RefreshAsync(true);
+        }
+        catch (Exception failure) when (failure is UsageReadException or System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            error = failure is UsageReadException ? failure.Message : "无法打开登录窗口，请在桌面版中完成登录。"; Render();
+        }
+    }
+
+    private void CopyConnectionDiagnostics()
+    {
+        var report = System.Text.Json.JsonSerializer.Serialize(new {
+            version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(),
+            source = client.Source, error, hasFiveHour = snapshot?.FiveHour?.RemainingPercent is not null,
+            hasWeekly = snapshot?.Weekly?.RemainingPercent is not null, mode = preferences.Mode.ToString()
+        }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        try { System.Windows.Clipboard.SetText(report); }
+        catch (System.Runtime.InteropServices.COMException) { error = "剪贴板正忙，请稍后重试。"; Render(); }
     }
 
     internal void SeedSelfTest(UsageSnapshot sample)

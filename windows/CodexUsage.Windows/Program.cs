@@ -29,13 +29,13 @@ internal static class Program
             var usage = await client.ReadAsync() ?? throw new UsageReadException("No response");
             var json = JsonSerializer.Serialize(new { fiveHourRemainingPercent = usage.FiveHour?.RemainingPercent,
                 weeklyRemainingPercent = usage.Weekly?.RemainingPercent, fiveHourResetsAt = usage.FiveHour?.ResetsAt,
-                weeklyResetsAt = usage.Weekly?.ResetsAt });
+                weeklyResetsAt = usage.Weekly?.ResetsAt, source = client.Source });
             if (output is null) Console.WriteLine(json); else await File.WriteAllTextAsync(output, json);
             return usage.FiveHour?.RemainingPercent is not null && usage.Weekly?.RemainingPercent is not null ? 0 : 2;
         }
         catch (UsageReadException failure)
         {
-            if (output is not null) await File.WriteAllTextAsync(output, JsonSerializer.Serialize(new { error = failure.Message }));
+            if (output is not null) await File.WriteAllTextAsync(output, JsonSerializer.Serialize(new { error = failure.Message, source = client.Source }));
             return 1;
         }
     }

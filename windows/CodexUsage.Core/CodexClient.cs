@@ -13,6 +13,8 @@ public sealed class CodexClient : IAsyncDisposable
 {
     public event Action? AccountChanged;
     private readonly CliCommand? command;
+    private readonly Func<CliCommand?> locate;
+    public string? Source { get; private set; }
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly SemaphoreSlim writer = new(1, 1);
     private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement>> pending = new();
@@ -22,7 +24,18 @@ public sealed class CodexClient : IAsyncDisposable
     private long sequence;
     private bool disposed;
 
-    public CodexClient(CliCommand? command = null) { this.command = command; }
+    public CodexClient(CliCommand? command = null, Func<CliCommand?>? locate = null)
+    {
+        this.command = command;
+        this.locate = locate ?? (() => CliLocator.Find());
+    }
+
+    public async Task ReconnectAsync()
+    {
+        await gate.WaitAsync().ConfigureAwait(false);
+        try { ObjectDisposedException.ThrowIf(disposed, this); Stop(); }
+        finally { gate.Release(); }
+    }
 
     public async Task<UsageSnapshot?> ReadAsync(CancellationToken cancellation = default)
     {
@@ -33,7 +46,10 @@ public sealed class CodexClient : IAsyncDisposable
             if (process is null || process.HasExited)
             {
                 Stop();
-                var cli = command ?? CliLocator.Find() ?? throw new UsageReadException("未找到 Codex CLI，请安装后运行 codex login");
+                Source = null;
+                var cli = command ?? await Task.Run(locate, cancellation).ConfigureAwait(false)
+                    ?? throw new UsageReadException("未找到 Codex CLI。请打开 Codex / ChatGPT 桌面版后刷新，或在菜单中选择 CLI 文件。");
+                Source = cli.Source;
                 process = new Process { StartInfo = cli.CreateStartInfo() };
                 if (!process.Start()) throw new UsageReadException("无法启动 Codex CLI");
                 var child = process;
@@ -42,14 +58,21 @@ public sealed class CodexClient : IAsyncDisposable
             }
             if (!initialized)
             {
-                await RequestAsync("initialize", new { clientInfo = new { name = "codex_usage", title = "Codex Usage", version = "0.3.1" } }, cancellation).ConfigureAwait(false);
+                await RequestAsync("initialize", new { clientInfo = new { name = "codex_usage", title = "Codex Usage", version = "0.3.3" } }, cancellation).ConfigureAwait(false);
                 await WriteAsync(new { method = "initialized", @params = new { } }).ConfigureAwait(false);
                 initialized = true;
             }
             var result = await RequestAsync("account/rateLimits/read", null, cancellation).ConfigureAwait(false);
-            return UsageSnapshot.Parse(result);
+            var snapshot = UsageSnapshot.Parse(result);
+            if (snapshot.FiveHour?.RemainingPercent is null && snapshot.Weekly?.RemainingPercent is null)
+                throw new UsageReadException("当前账户未返回 5h / 周额度。请确认桌面版已登录 ChatGPT 账户，或使用菜单中的登录入口。", true);
+            return snapshot;
         }
-        catch (UsageReadException) { throw; }
+        catch (UsageReadException failure)
+        {
+            if (failure.ClearSnapshot) Stop(); // Reload CLI-managed login after a sign-in or account change.
+            throw;
+        }
         catch (Exception error) when (error is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or JsonException or TimeoutException or OperationCanceledException)
         {
             Stop();
@@ -100,8 +123,9 @@ public sealed class CodexClient : IAsyncDisposable
                         if (message.TryGetProperty("error", out var error))
                         {
                             var text = error.TryGetProperty("message", out var description) ? description.GetString() ?? "" : "";
-                            var auth = text.Contains("auth", StringComparison.OrdinalIgnoreCase) || text.Contains("login", StringComparison.OrdinalIgnoreCase) || text.Contains("401", StringComparison.Ordinal);
-                            request.TrySetException(new UsageReadException(auth ? "登录已失效，请运行 codex login" : "服务暂时无法读取用量，将自动重试", auth));
+                            var auth = new[] { "auth", "login", "log in", "logged in", "sign in", "401", "no account", "account not found" }
+                                .Any(marker => text.Contains(marker, StringComparison.OrdinalIgnoreCase));
+                            request.TrySetException(new UsageReadException(auth ? "本机 Codex 登录不可用。请在桌面版登录 ChatGPT，或使用菜单中的“登录 Codex 账户”。" : "服务暂时无法读取用量，将自动重试", auth));
                         }
                         else if (message.TryGetProperty("result", out var result)) request.TrySetResult(result.Clone());
                         else request.TrySetException(new JsonException("Missing result"));
